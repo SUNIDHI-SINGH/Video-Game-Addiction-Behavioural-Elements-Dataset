@@ -1,0 +1,1381 @@
+!pip install  -U -q git+https://github.com/huggingface/transformers.git git+https://github.com/huggingface/trl.git datasets bitsandbytes peft qwen-vl-utils wandb accelerate
+
+
+!pip install -q torch==2.4.1+cu121 torchvision==0.19.1+cu121 torchaudio==2.4.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121
+
+
+from huggingface_hub import notebook_login
+notebook_login()
+
+system_message = """You are a Vision Language Model specialized in interpreting video game addiction from the video game snaps.
+Your task is to analyze the provided video game image and respond to queries with reasoning based answers with addiction perspective of game design elements present.
+The dataset has ten different games namely SuperMario, PUBG, Valorant, Minecraft, FIFA, World of Warcraft, Rocket League, Fortnite, AmongUS, GTA Vice city on eight different game plays. There are 8 distinct behavioural query and answer for these 10 games.
+"""
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+def resize_image(image, max_size=(224, 224)):
+    """
+    Resize an image to a maximum size while maintaining aspect ratio.
+    """
+    image.thumbnail(max_size, Image.Resampling.LANCZOS)  # Updated here
+    return image
+
+def compress_image(image, quality=95):
+    """
+    Compress an image by reducing its quality.
+    """
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", quality=quality)
+    buffer.seek(0)
+    compressed_image = Image.open(buffer)
+    return compressed_image
+
+def preprocess_image(image, max_size=(812, 812), quality=85):
+    """
+    Preprocess an image by resizing and compressing it.
+    """
+    resized_image = resize_image(image, max_size)
+    compressed_image = compress_image(resized_image, quality)
+    return compressed_image
+def format_data(sample):
+    sample["image"] = preprocess_image(sample["image"])
+
+    return [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": system_message}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "image": sample["Image"],
+                },
+                {
+                    "type": "text",
+                    "text": sample["Query"],
+                },
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": sample["Answer"][0]}],
+        },
+    ]
+
+import pandas as pd
+import os
+
+# Your dataset path
+excel_file = "/content/Dataset_Multiclass_VideoGame.xlsx"
+images_dir = "/content/drive/MyDrive/"
+
+# Step 1: Load Excel file
+df = pd.read_excel(excel_file)
+
+# Optional: Clean column names
+df.columns = df.columns.str.strip()
+
+# Step 2: Build full image paths
+df['Image'] = df['Image'].apply(lambda x: os.path.join(images_dir, x))
+
+# Optional: Validate if image file exists (useful for debugging)
+def check_image_exists(path):
+    if not os.path.isfile(path):
+        print(f"Warning: Image not found - {path}")
+    return path
+
+df['Image'] = df['Image'].apply(check_image_exists)
+
+# Step 3: Save into Parquet
+parquet_file = "multimodal_dataset.parquet"
+df.to_parquet(parquet_file, index=False)
+
+print(f"✅ Parquet file saved at: {parquet_file}")
+
+
+import pandas as pd
+
+# Path to your parquet file
+parquet_file = "multimodal_dataset.parquet"
+
+# Read parquet file into pandas dataframe
+df = pd.read_parquet(parquet_file)
+
+# Print the first few rows
+print(df.head())
+
+
+from sklearn.model_selection import train_test_split
+
+# Load parquet
+df = pd.read_parquet("multimodal_dataset.parquet")
+
+# Shuffle
+df = df.sample(frac=1, random_state=42)
+
+# Split
+train_df, temp_df = train_test_split(df, test_size=5, random_state=42)
+val_df, test_df = train_test_split(temp_df, test_size=3, random_state=42)
+train_df = train_df.reset_index(drop=True)
+val_df = val_df.reset_index(drop=True)
+test_df = test_df.reset_index(drop=True)
+
+# Save splits
+train_df.to_parquet("train.parquet", index=False)
+val_df.to_parquet("val.parquet", index=False)
+test_df.to_parquet("test.parquet", index=False)
+
+
+train_df
+
+from datasets import load_dataset, Dataset, DatasetDict
+
+# Convert pandas to HF Dataset
+train_dataset = Dataset.from_pandas(train_df)
+val_dataset = Dataset.from_pandas(val_df)
+test_dataset = Dataset.from_pandas(test_df)
+
+# Bundle into DatasetDict
+dataset_dict = DatasetDict({
+    'train': train_dataset,
+    'validation': val_dataset,
+    'test': test_dataset
+})
+
+
+# train_dataset = train_dataset.remove_columns("__index_level_0__")
+# val_dataset = train_dataset.remove_columns("__index_level_0__")
+# test_dataset = train_dataset.remove_columns("__index_level_0__")
+# train_dataset=train_dataset[4:7]
+# val_dataset=val_dataset[0:3]
+# test_dataset=test_dataset[0:3]
+
+for sample in train_dataset:
+  print(sample)
+  break
+
+# system_message = "You are a helpful AI assistant for image question answering."
+
+# def format_data(sample):
+#     return [
+#         {
+#             "role": "system",
+#             "content": [{"type": "text", "text": system_message}],
+#         },
+#         {
+#             "role": "user",
+#             "content": [
+#                 {"type": "image", "image": sample["Image"]},
+#                 {"type": "text", "text": sample["Query"]},
+#             ],
+#         },
+#         {
+#             "role": "assistant",
+#             "content": [{"type": "text", "text": sample["Answer"]}],
+#         },
+#     ]
+
+# # Format each dataset
+# train_dataset = [format_data(sample) for sample in train_df.to_dict(orient="records")]
+# val_dataset = [format_data(sample) for sample in val_df.to_dict(orient="records")]
+# test_dataset = [format_data(sample) for sample in test_df.to_dict(orient="records")]
+
+
+train_df
+
+system_message = "You are a helpful AI assistant for image question answering."
+
+def format_data(sample):
+    return [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": system_message}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": sample["Image"]},
+                {"type": "text", "text": sample["Query"]},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": sample["Answer"]}],
+        },
+    ]
+
+# train_dataset = [format_data(sample) for sample in train_df]
+# eval_dataset = [format_data(sample) for sample in eval_df]
+# test_dataset = [format_data(sample) for sample in test_df]
+
+formatted_train_dataset = [format_data(sample) for sample in train_df.to_dict(orient="records")]
+
+
+train_dataset_ = [format_data(sample) for sample in train_df.to_dict(orient="records")]
+eval_dataset_ = [format_data(sample) for sample in val_df.to_dict(orient="records")]
+test_dataset_ = [format_data(sample) for sample in test_df.to_dict(orient="records")]
+
+
+# train_dataset_=train_dataset_[4:7]
+# eval_dataset_=eval_dataset_[0:2]
+# test_dataset_=test_dataset_[0:2]
+
+
+print(train_dataset_[4])
+
+import torch
+from transformers import Qwen2VLForConditionalGeneration, Qwen2VLProcessor
+
+model_id = "Qwen/Qwen2-VL-7B-Instruct"
+
+model = Qwen2VLForConditionalGeneration.from_pretrained(
+    model_id,
+    device_map="auto",
+    torch_dtype=torch.bfloat16,
+)
+processor = Qwen2VLProcessor.from_pretrained(model_id)
+
+
+from peft import LoraConfig, get_peft_model
+
+peft_config = LoraConfig(
+    lora_alpha=16,
+    lora_dropout=0.05,
+    r=8,
+    bias="none",
+    target_modules=["q_proj", "v_proj"],
+    task_type="CAUSAL_LM",
+)
+
+peft_model = get_peft_model(model, peft_config)
+peft_model.print_trainable_parameters()
+
+
+#display all the frozen layers
+for name, param in peft_model.named_parameters():
+    if not param.requires_grad:
+        print(name)
+
+
+# View trainable layers
+for name, param in peft_model.named_parameters():
+    if param.requires_grad:
+        print(name)
+
+
+import torch
+from transformers import BitsAndBytesConfig, Qwen2VLForConditionalGeneration, Qwen2VLProcessor
+from trl import SFTConfig
+from peft import LoraConfig, get_peft_model
+
+model_id = "Qwen/Qwen2-VL-7B-Instruct"
+
+# Load model in 4-bit
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16
+)
+
+model = Qwen2VLForConditionalGeneration.from_pretrained(
+    model_id,
+    quantization_config=bnb_config,
+    device_map="auto", # Add device map back for 8-bit loading
+    torch_dtype=torch.bfloat16, # Keep torch_dtype for compatibility
+)
+processor = Qwen2VLProcessor.from_pretrained(model_id)
+
+# Apply LoRA config to the 4-bit model
+peft_config = LoraConfig(
+    lora_alpha=16,
+    lora_dropout=0.05,
+    r=8,
+    bias="none",
+    target_modules=["q_proj", "v_proj"],
+    task_type="CAUSAL_LM",
+)
+
+peft_model = get_peft_model(model, peft_config)
+peft_model.print_trainable_parameters()
+
+# Explicitly move the model to the CUDA device
+peft_model.to("cuda")
+
+
+training_args = SFTConfig(
+    output_dir="qwen2-finetuned-multimodal",
+    num_train_epochs=3,
+    per_device_train_batch_size=1,  # small dataset, small batch - Reduced batch size
+    per_device_eval_batch_size=1,  # Batch size for evaluation
+    gradient_accumulation_steps=8, # Increased gradient accumulation steps
+    gradient_checkpointing=True,
+    optim="adamw_torch_fused",
+    learning_rate=2e-4,
+    lr_scheduler_type="constant",  # Type of learning rate scheduler
+    bf16=False,  # <-- disable bf16
+    fp16=True,
+    label_names=["labels"],  # ✅ CORRECT — goes here
+
+    warmup_ratio=0.03,
+    save_steps=10,
+    logging_steps=5,
+    eval_steps=10,
+    eval_strategy="steps",
+    save_strategy="steps",
+    metric_for_best_model="eval_loss",  # Metric to evaluate the best model
+    greater_is_better=False,  # Whether higher metric values are better
+    load_best_model_at_end=True,
+    report_to="none",
+    gradient_checkpointing_kwargs={"use_reentrant": False},
+    max_grad_norm=0.3,  # Maximum norm for gradient clipping
+    push_to_hub=True,  # Whether to push model to Hugging Face Hub
+    dataset_text_field="",  # Text field in dataset
+    dataset_kwargs={"skip_prepare_dataset": True},  # Additional dataset options
+    disable_tqdm=False,
+)
+training_args.remove_unused_columns = False
+
+from qwen_vl_utils import process_vision_info # Keep import in case it's needed elsewhere
+from PIL import Image # Import Pillow
+
+# Create a data collator to encode text and image pairs
+def collate_fn(examples):
+    # Get the texts and apply the chat template
+    texts = [
+        processor.apply_chat_template(example, tokenize=False) for example in examples
+    ]
+
+    # Open images using PIL
+    images = []
+    for example in examples:
+        user_turn = None
+        for turn in example:
+            if turn["role"] == "user":
+                user_turn = turn
+                break
+
+        if user_turn and "content" in user_turn:
+            image_path = None
+            for content_item in user_turn["content"]:
+                if content_item["type"] == "image":
+                    image_path = content_item["image"]
+                    break
+
+            if image_path:
+                try:
+                    img = Image.open(image_path).convert("RGB")
+                    images.append(img)
+                except Exception as e:
+                    print(f"Error opening image {image_path}: {e}")
+                    images.append(None) # Append None if image opening fails
+            else:
+                 images.append(None) # Append None if no image path found
+        else:
+            images.append(None) # Append None if no user turn found
+
+
+    # Filter out None values if any image failed to load or was not found
+    valid_images = [img for img in images if img is not None]
+
+    # If there are multiple examples but no valid images, raise an error
+    if len(examples) > 0 and not valid_images:
+         raise ValueError("No valid images found in the batch after processing.")
+
+
+    # Tokenize the texts and let the processor handle PIL Images
+    try:
+        # Pass the list of PIL Images to the processor
+        batch = processor(
+            text=texts, images=valid_images if valid_images else None, return_tensors="pt", padding=True
+        )
+    except Exception as e:
+        print(f"Error during processor call with PIL images: {e}")
+        raise # Re-raise the exception after printing for debugging
+
+
+    # The labels are the input_ids, and we mask the padding tokens in the loss computation
+    labels = batch["input_ids"].clone()
+    labels[labels == processor.tokenizer.pad_token_id] = -100
+
+    # Ignore the image token index in the loss computation (model specific)
+    if hasattr(processor.tokenizer, 'get_image_token_id'):
+         image_token_id = processor.tokenizer.get_image_token_id()
+         labels[labels == image_token_id] = -100
+    elif isinstance(processor, Qwen2VLProcessor):
+         # Specific image token IDs for Qwen2VLProcessor
+         image_tokens = [151652, 151653, 151655]
+         for image_token_id in image_tokens:
+             labels[labels == image_token_id] = -100
+
+
+    batch["labels"] = labels
+
+    return batch
+
+# def collate_fn(examples):
+#     # Convert examples to just the list of messages
+#     conversations = [ex["messages"] if "messages" in ex else ex for ex in examples]
+
+#     # 1. Apply chat template
+#     texts = [
+#         processor.apply_chat_template(conv, tokenize=False)
+#         for conv in conversations
+#     ]
+
+#     # 2. Extract and preprocess image inputs
+#     image_inputs = []
+#     for conv in conversations:
+#         _, model_images, _ = process_vision_info(conv)
+#         image_inputs.append(model_images)
+
+#     # 3. Tokenize texts + images
+#     batch = processor(
+#         text=texts,
+#         images=image_inputs,
+#         return_tensors="pt",
+#         padding=True
+#     )
+
+#     # 4. Mask labels (optional)
+#     labels = batch["input_ids"].clone()
+#     labels[labels == processor.tokenizer.pad_token_id] = -100
+#     batch["labels"] = labels
+
+#     return batch
+
+
+batch = collate_fn([train_dataset_[0]])
+
+
+batch
+
+
+
+# Print result
+for k, v in batch.items():
+    print(f"{k}: {v.shape if hasattr(v, 'shape') else v}")
+
+
+from trl import SFTTrainer
+
+trainer = SFTTrainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset_,
+    eval_dataset=eval_dataset_,
+    data_collator=collate_fn,
+    peft_config=peft_config,
+    processing_class=processor.tokenizer,
+
+)
+
+import torch
+
+torch.cuda.empty_cache()
+print("PyTorch CUDA cache cleared before training.")
+
+print("Training started")
+trainer.train()
+print("Training ended")
+
+# Save the fine-tuned model and processor after training
+output_dir = "qwen2-finetuned-multimodal"
+trainer.save_model(output_dir)
+processor.save_pretrained(output_dir)
+
+print(f"Fine-tuned model and processor saved to '{output_dir}'")
+
+!pip install evaluate bert-score
+!pip install rouge_score
+
+
+!unzip qwen2-finetuned-multimodal.zip -d /content/
+
+import torch
+import pandas as pd
+import evaluate
+from sklearn.metrics import accuracy_score
+from transformers import Qwen2VLProcessor, Qwen2VLForConditionalGeneration
+from qwen_vl_utils import process_vision_info
+from PIL import Image
+import io
+
+# Load metrics
+bleu = evaluate.load("bleu")
+rouge = evaluate.load("rouge")
+meteor = evaluate.load("meteor")
+bertscore = evaluate.load("bertscore")
+# Load the fine-tuned model and processor
+try:
+    model = Qwen2VLForConditionalGeneration.from_pretrained(
+        "qwen2-finetuned-multimodal",
+        device_map="auto",
+        torch_dtype=torch.bfloat16,
+    )
+    processor = Qwen2VLProcessor.from_pretrained("qwen2-finetuned-multimodal")
+except Exception as e:
+    print(f"Error loading fine-tuned model: {e}")
+    print("Please ensure you have trained and saved the model correctly.")
+    # You might want to exit or handle this error appropriately
+
+# Function to generate output for a single sample (a formatted conversation)
+def generate_text_from_sample(model, processor, sample, max_new_tokens=100, device="cuda"):
+    # Prepare text input using the entire conversation structure
+    # The sample is already in the correct chat format (list of dictionaries)
+    text_input = processor.apply_chat_template(
+        sample, tokenize=False, add_generation_prompt=True
+       )
+
+    # ------------------------- #
+    # Function to generate prediction from sample
+    # ------------------------- #
+
+
+    # Process vision
+    # Assuming sample[1]["content"] contains a list of image dictionaries and text dictionaries
+    image_inputs = []
+    user_turn = sample[1] # User turn is the second element in the formatted sample
+    if "content" in user_turn:
+        for content_item in user_turn["content"]:
+            if content_item["type"] == "image":
+                try:
+                    # Assuming content_item["image"] is a file path
+                    img = Image.open(content_item["image"]).convert("RGB")
+                    # Use the preprocess_image function if needed, ensure it's defined or imported
+                    # preprocessed_img = preprocess_image(img)
+                    image_inputs.append(img)
+                except Exception as e:
+                    print(f"Error loading image {content_item['image']}: {e}")
+                    image_inputs.append(None)
+
+    # Filter out any None values if image loading failed
+    valid_image_inputs = [img for img in image_inputs if img is not None]
+
+    if not valid_image_inputs:
+        # Handle case where no valid images are found in the sample
+        print(f"Warning: No valid images found for sample.")
+        # You might want to return an empty string or a specific error message
+        return ""
+
+
+    # Prepare model inputs
+    try:
+        model_inputs = processor(
+            text=[text_input],
+            images=valid_image_inputs,
+            return_tensors="pt"
+        ).to(device)
+    except Exception as e:
+        print(f"Error processing inputs for sample: {e}")
+        return ""
+
+
+    # Generate
+    try:
+        generated_ids = model.generate(**model_inputs, max_new_tokens=max_new_tokens)
+        # Decode only the generated part
+        input_len = model_inputs.input_ids.shape[1]
+        trimmed_generated_ids = generated_ids[:, input_len:]
+        output_text = processor.batch_decode(trimmed_generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        return output_text[0] if output_text else ""
+    except Exception as e:
+        print(f"Error during generation for sample: {e}")
+        return ""
+
+# ------------------------- #
+# Evaluation function (with strict error skip)
+# ------------------------- #
+def evaluate_model(model, processor, dataset, device="cuda"):
+    predictions, references = [], []
+    print(f"Performing inference on {len(dataset)} samples...")
+
+    for i, sample in enumerate(dataset):
+        if i % 10 == 0:
+            print(f"Processing sample {i+1}/{len(dataset)}")
+        try:
+            expected_answer = sample[2]["content"][0]["text"].strip()
+            predicted_answer = generate_text_from_sample(model, processor, sample, max_new_tokens=100, device=device)
+
+            if predicted_answer is None:
+                continue  # skip this sample due to generation failure
+
+            references.append(expected_answer)
+            predictions.append(predicted_answer)
+
+        except Exception as e:
+            print(f"⚠️ Error on sample {i}: {e}")
+            continue  # skip this sample entirely
+
+        torch.cuda.empty_cache()
+
+    print(f"Inference complete. Evaluated on {len(predictions)} successful samples.")
+
+    if not predictions:
+        raise ValueError("No successful samples to evaluate.")
+
+    # Exact Match Accuracy
+    exact_matches = [1 if p.lower() == r.lower() else 0 for p, r in zip(predictions, references)]
+    accuracy = sum(exact_matches) / len(references)
+
+    # BLEU
+    bleu_score = bleu.compute(predictions=predictions, references=[[r] for r in references])["bleu"]
+
+    # ROUGE
+    rouge_scores = rouge.compute(predictions=predictions, references=references)
+
+    # METEOR
+    meteor_score = meteor.compute(predictions=predictions, references=references)["meteor"]
+
+    # BERTScore
+    bert_scores = bertscore.compute(predictions=predictions, references=references, lang="en")
+    bertscore_f1 = sum(bert_scores["f1"]) / len(bert_scores["f1"])
+
+    metrics = {
+        "accuracy (exact match)": accuracy,
+        "bleu": bleu_score,
+        "meteor": meteor_score,
+        "rouge1": rouge_scores["rouge1"],
+        "rouge2": rouge_scores["rouge2"],
+        "rougeL": rouge_scores["rougeL"],
+        "bertscore_f1": bertscore_f1,
+        "predictions": predictions,
+        "references": references
+    }
+
+    return metrics, predictions, references
+
+# ------------------------- #
+# Perform Evaluations
+# ------------------------- #
+
+print("\n--- Evaluating on Training Dataset ---")
+train_metrics, train_predictions, train_references = evaluate_model(model, processor, train_dataset_, device="cuda")
+
+print("\nTraining Metrics:")
+for k, v in train_metrics.items():
+    if k not in ["predictions", "references"]:
+        print(f"{k}: {v:.4f}")
+
+
+print("\n--- Evaluating on val Dataset ---")
+val_metrics, val_predictions, val_references = evaluate_model(model, processor, eval_dataset_, device="cuda")
+
+print("\val Metrics:")
+for k, v in val_metrics.items():
+    if k not in ["predictions", "references"]:
+        print(f"{k}: {v:.4f}")
+
+
+print("\n--- Evaluating on Test Dataset ---")
+test_metrics, test_predictions, test_references = evaluate_model(model, processor, test_dataset_, device="cuda")
+
+print("\nTest Metrics:")
+for k, v in test_metrics.items():
+    if k not in ["predictions", "references"]:
+        print(f"{k}: {v:.4f}")
+
+# ------------------------- #
+# Save to Excel
+# ------------------------- #
+
+# Prepare DataFrames
+train_df = pd.DataFrame({
+    "Metric": [k for k in train_metrics if k not in ["predictions", "references"]],
+    "Training Value": [round(train_metrics[k], 4) for k in train_metrics if k not in ["predictions", "references"]]
+})
+
+val_df = pd.DataFrame({
+    "Metric": [k for k in val_metrics if k not in ["predictions", "references"]],
+    "Training Value": [round(val_metrics[k], 4) for k in val_metrics if k not in ["predictions", "references"]]
+})
+
+test_df = pd.DataFrame({
+    "Metric": [k for k in test_metrics if k not in ["predictions", "references"]],
+    "Test Value": [round(test_metrics[k], 4) for k in test_metrics if k not in ["predictions", "references"]]
+})
+# Merge training, validation, and test metrics on Metric
+temp_df = pd.merge(train_df, val_df, on="Metric", how="outer")
+combined_df = pd.merge(temp_df, test_df, on="Metric", how="outer")
+
+# Save everything to Excel
+output_file = "evaluation_metrics.xlsx"
+with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+    combined_df.to_excel(writer, sheet_name="Metrics", index=False)
+
+    pd.DataFrame({
+        "Train Predictions": train_predictions,
+        "Train References": train_references
+    }).to_excel(writer, sheet_name="Train Results", index=False)
+
+    pd.DataFrame({
+        "Val Predictions": val_predictions,
+        "Val References": val_references
+    }).to_excel(writer, sheet_name="Val Results", index=False)
+
+    pd.DataFrame({
+        "Test Predictions": test_predictions,
+        "Test References": test_references
+    }).to_excel(writer, sheet_name="Test Results", index=False)
+
+print(f"\n✅ Evaluation metrics saved to '{output_file}'")
+
+print("Training done")
+
+# Reload fine-tuned model
+model = Qwen2VLForConditionalGeneration.from_pretrained(
+    "qwen2-finetuned-multimodal",
+    device_map="auto",
+    torch_dtype=torch.bfloat16,
+)
+processor = Qwen2VLProcessor.from_pretrained("qwen2-finetuned-multimodal")
+
+# Sample inference function
+def generate_output(model, processor, sample, device="cuda"):
+    text_input = processor.apply_chat_template(sample[1:2], tokenize=False, add_generation_prompt=True)
+    image_inputs, _ = process_vision_info(sample)
+
+    model_inputs = processor(
+        text=[text_input],
+        images=image_inputs,
+        return_tensors="pt"
+    ).to(device)
+
+    generated_ids = model.generate(**model_inputs, max_new_tokens=512)
+    output = processor.batch_decode(generated_ids, skip_special_tokens=True)
+    return output[0]
+
+# Try inference on one of your samples
+output = generate_output(model, processor, train_dataset[0])
+print(output)
+
+# ------------------------- #
+# Perform Custom Inference on New Image Paths
+# ------------------------- #
+
+# 🔧 Define your image paths and textual prompt (adjust as needed)
+custom_image_paths = [
+    "/content/Inference1_PUBG.jpg",
+    "/content/Inference2_pubg.jpg",
+    # Add more paths here
+]
+
+# Example prompt (can be tailored for your use case)
+user_prompt = "Describe the addictive behavioural features such as engagement strategy, reinforcement schedule, role playing elements in this game frame."
+
+# 🔁 Build a sample using the same structure your model expects
+def build_sample_from_image_paths(image_paths, user_prompt):
+    return [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_prompt}
+            ] + [{"type": "image", "image": path} for path in image_paths]
+        }
+    ]
+
+# 🔍 Run inference on each image
+print("\n🔎 Running Inference on Custom Images:")
+for img_path in custom_image_paths:
+    sample = build_sample_from_image_paths([img_path], user_prompt)
+    output = generate_text_from_sample(model, processor, sample, device="cuda")
+    print(f"\n🖼️ Image: {img_path}")
+    print(f"📢 Prompt: {user_prompt}")
+    print(f"📘 Response: {output}")
+
+
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score
+import evaluate
+
+# Load prediction results
+orig_results = pd.read_excel("/content/evaluation_metrics (2).xlsx", sheet_name="Test Results")
+finetuned_results = pd.read_excel("/content/evaluation_metrics (2).xlsx", sheet_name="Test Results")
+
+# Optional sanity check
+assert len(orig_results) == len(finetuned_results), "Mismatch in number of samples"
+
+
+bertscore = evaluate.load("bertscore")
+
+# Use the references (assumed to be the same)
+references = finetuned_results["Test References"].tolist()
+orig_preds = orig_results["Test Predictions"].astype(str).tolist()
+finetuned_preds = finetuned_results["Test Predictions"].astype(str).tolist()
+
+# Compute BERTScore
+orig_bert = bertscore.compute(predictions=orig_preds, references=references, lang="en")["f1"]
+finetuned_bert = bertscore.compute(predictions=finetuned_preds, references=references, lang="en")["f1"]
+
+# Create DataFrame
+df = pd.DataFrame({
+    "BERTScore (Original)": orig_bert,
+    "BERTScore (Finetuned)": finetuned_bert
+})
+df["Change"] = df["BERTScore (Finetuned)"] - df["BERTScore (Original)"]
+
+
+sns.histplot(df["Change"], bins=30, kde=True)
+plt.axvline(0, color='red', linestyle='--', label='No Change')
+plt.title("Concept Shift: Change in BERTScore after Finetuning")
+plt.xlabel("BERTScore(Finetuned) - BERTScore(Original)")
+plt.legend()
+plt.show()
+
+
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+
+# STEP 1: Load the Excel files and extract relevant columns
+sheet_name = "Test Results"  # change if needed
+
+# Load original model outputs
+original_df = pd.read_excel("/content/evaluation_metrics (2).xlsx", sheet_name=sheet_name)
+original_preds = original_df["Test Predictions"].astype(str).tolist()
+references = original_df["Test References"].astype(str).tolist()
+
+# Load fine-tuned model outputs
+finetuned_df = pd.read_excel("/content/evaluation_metrics (3).xlsx", sheet_name=sheet_name)
+finetuned_preds = finetuned_df["Test Predictions"].astype(str).tolist()
+
+# STEP 2: Get sentence embeddings
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+original_embeds = model.encode(original_preds, convert_to_numpy=True)
+finetuned_embeds = model.encode(finetuned_preds, convert_to_numpy=True)
+reference_embeds = model.encode(references, convert_to_numpy=True)
+
+# STEP 3: Combine embeddings for visualization
+all_embeddings = np.concatenate([original_embeds, finetuned_embeds, reference_embeds], axis=0)
+labels = (['Original Prediction'] * len(original_embeds) +
+          ['Fine-tuned Prediction'] * len(finetuned_embeds) +
+          ['Reference'] * len(reference_embeds))
+
+# STEP 4: Apply t-SNE
+tsne = TSNE(n_components=2, random_state=42, perplexity=2) # Changed perplexity to 2
+embeddings_2d = tsne.fit_transform(all_embeddings)
+
+# STEP 5: Plot the embedding space
+color_map = {
+    'Original Prediction': 'blue',
+    'Fine-tuned Prediction': 'red',
+    'Reference': 'green'
+}
+
+plt.figure(figsize=(12, 7))
+for label in set(labels):
+    idxs = [i for i, l in enumerate(labels) if l == label]
+    plt.scatter(embeddings_2d[idxs, 0], embeddings_2d[idxs, 1],
+                c=color_map[label], label=label, alpha=0.6)
+
+plt.legend()
+plt.title("Concept Drift in Embedding Space")
+plt.xlabel("Dimension 1")
+plt.ylabel("Dimension 2")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+
+# STEP 1: Load the Excel files and extract relevant columns
+sheet_name = "Train Results"  # change if needed
+
+# Load original model outputs
+original_df = pd.read_excel("/content/evaluation_metrics (2).xlsx", sheet_name=sheet_name)
+original_preds = original_df["Train Predictions"].astype(str).tolist()
+references = original_df["Train References"].astype(str).tolist()
+
+# Load fine-tuned model outputs
+finetuned_df = pd.read_excel("/content/evaluation_metrics (3).xlsx", sheet_name=sheet_name)
+finetuned_preds = finetuned_df["Train Predictions"].astype(str).tolist()
+
+# STEP 2: Get sentence embeddings
+model = SentenceTransformer('bert-base-uncased')
+
+original_embeds = model.encode(original_preds, convert_to_numpy=True)
+finetuned_embeds = model.encode(finetuned_preds, convert_to_numpy=True)
+reference_embeds = model.encode(references, convert_to_numpy=True)
+
+# STEP 3: Combine embeddings for visualization
+all_embeddings = np.concatenate([original_embeds, finetuned_embeds, reference_embeds], axis=0)
+labels = (['Original Prediction'] * len(original_embeds) +
+          ['Fine-tuned Prediction'] * len(finetuned_embeds) +
+          ['Reference'] * len(reference_embeds))
+
+# STEP 4: Apply t-SNE
+tsne = TSNE(n_components=2, random_state=42, perplexity=74) # Changed perplexity to 2
+embeddings_2d = tsne.fit_transform(all_embeddings)
+
+# STEP 5: Plot the embedding space
+color_map = {
+    'Original Prediction': 'blue',
+    'Fine-tuned Prediction': 'red',
+    'Reference': 'green'
+}
+
+plt.figure(figsize=(12, 7))
+for label in set(labels):
+    idxs = [i for i, l in enumerate(labels) if l == label]
+    plt.scatter(embeddings_2d[idxs, 0], embeddings_2d[idxs, 1],
+                c=color_map[label], label=label, alpha=0.6)
+
+plt.legend()
+plt.title("Concept Drift in Embedding Space")
+plt.xlabel("Dimension 1")
+plt.ylabel("Dimension 2")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # Needed for 3D plotting
+
+# STEP 1: Load Excel data
+sheet_name = "Train Results"
+
+original_df = pd.read_excel("/content/evaluation_metrics (2).xlsx", sheet_name=sheet_name)
+finetuned_df = pd.read_excel("/content/evaluation_metrics (3).xlsx", sheet_name=sheet_name)
+
+original_preds = original_df["Train Predictions"].astype(str).tolist()
+finetuned_preds = finetuned_df["Train Predictions"].astype(str).tolist()
+references = original_df["Train References"].astype(str).tolist()
+
+# STEP 2: Get embeddings
+model = SentenceTransformer('bert-base-uncased')
+original_embeds = model.encode(original_preds, convert_to_numpy=True)
+finetuned_embeds = model.encode(finetuned_preds, convert_to_numpy=True)
+reference_embeds = model.encode(references, convert_to_numpy=True)
+
+# STEP 3: Combine embeddings and labels
+all_embeddings = np.concatenate([original_embeds, finetuned_embeds, reference_embeds], axis=0)
+labels = (['Original Prediction'] * len(original_embeds) +
+          ['Fine-tuned Prediction'] * len(finetuned_embeds) +
+          ['Reference'] * len(reference_embeds))
+
+# STEP 4: t-SNE with 3D output
+tsne = TSNE(n_components=3, perplexity=74, random_state=42)
+embeddings_3d = tsne.fit_transform(all_embeddings)
+
+# STEP 5: Plot in 3D
+fig = plt.figure(figsize=(12, 8))
+ax = fig.add_subplot(111, projection='3d')
+
+color_map = {
+    'Original Prediction': 'blue',
+    'Fine-tuned Prediction': 'red',
+    'Reference': 'green'
+}
+
+for label in set(labels):
+    idxs = [i for i, l in enumerate(labels) if l == label]
+    ax.scatter(embeddings_3d[idxs, 0], embeddings_3d[idxs, 1], embeddings_3d[idxs, 2],
+               c=color_map[label], label=label, alpha=0.6)
+
+ax.set_title("3D t-SNE Visualization of Embedding Space")
+ax.set_xlabel("Dimension 1")
+ax.set_ylabel("Dimension 2")
+ax.set_zlabel("Dimension 3")
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+
+pip install sentence-transformers pandas matplotlib openpyxl
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from sentence_transformers import SentenceTransformer
+from sklearn.manifold import TSNE
+
+# STEP 1: Load Excel data
+sheet_name = "Train Results"
+original_df = pd.read_excel("/content/evaluation_metrics (2).xlsx", sheet_name=sheet_name)
+finetuned_df = pd.read_excel("/content/evaluation_metrics (3).xlsx", sheet_name=sheet_name)
+
+original_preds = original_df["Train Predictions"].astype(str).tolist()
+finetuned_preds = finetuned_df["Train Predictions"].astype(str).tolist()
+references = original_df["Train References"].astype(str).tolist()
+
+# Use the minimum length across all lists
+min_len = min(len(original_preds), len(finetuned_preds), len(references))
+
+original_preds = original_preds[:min_len]
+finetuned_preds = finetuned_preds[:min_len]
+references = references[:min_len]
+
+
+# STEP 2: Encode using BERT
+model = SentenceTransformer("bert-base-uncased")
+original_embeds = model.encode(original_preds, convert_to_numpy=True)
+finetuned_embeds = model.encode(finetuned_preds, convert_to_numpy=True)
+reference_embeds = model.encode(references, convert_to_numpy=True)
+
+# STEP 3: Reduce all embeddings using t-SNE jointly
+all_combined = np.concatenate([original_embeds, finetuned_embeds, reference_embeds])
+tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, min_len - 1)) # Adjust perplexity based on min_len
+all_2d = tsne.fit_transform(all_combined)
+
+n = len(original_preds) # Now n is min_len
+original_2d = all_2d[:n]
+finetuned_2d = all_2d[n:2*n]
+reference_2d = all_2d[2*n:]
+
+# STEP 4: Create interpolated frames (morph from original → fine-tuned → reference)
+def interpolate(a, b, alpha):
+    return (1 - alpha) * a + alpha * b
+
+frames = 60
+embeddings_over_time = []
+
+# Phase 1: Original → Fine-tuned
+for i in range(frames):
+    alpha = i / frames
+    interp = interpolate(original_2d, finetuned_2d, alpha)
+    embeddings_over_time.append(interp)
+
+# Phase 2: Fine-tuned → Reference
+for i in range(frames):
+    alpha = i / frames
+    interp = interpolate(finetuned_2d, reference_2d, alpha)
+    embeddings_over_time.append(interp)
+
+# STEP 5: Animate using Matplotlib
+fig, ax = plt.subplots(figsize=(8, 6))
+sc = ax.scatter([], [], s=30, alpha=0.7)
+ax.set_xlim(np.min(all_2d[:, 0]) - 5, np.max(all_2d[:, 0]) + 5)
+ax.set_ylim(np.min(all_2d[:, 1]) - 5, np.max(all_2d[:, 1]) + 5)
+ax.set_title("Evolving Embedding Space (Original → Fine-tuned → Reference)")
+ax.set_xlabel("t-SNE Dimension 1")
+ax.set_ylabel("t-SNE Dimension 2")
+
+def update(frame_idx):
+    points = embeddings_over_time[frame_idx]
+    sc.set_offsets(points)
+    return sc,
+
+ani = FuncAnimation(fig, update, frames=len(embeddings_over_time), interval=100, blit=True)
+
+# Save animation or show
+ani.save("embedding_evolution.gif", writer="pillow")
+plt.show()  # Uncomment to view inline if running locally
+
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+import re
+
+# STEP 1: Load Excel files
+sheet_name = "Train Results"
+original_df = pd.read_excel("/content/evaluation_metrics (2).xlsx", sheet_name=sheet_name)
+finetuned_df = pd.read_excel("/content/evaluation_metrics (3).xlsx", sheet_name=sheet_name)
+
+# Extract sentences
+original_preds = original_df["Train Predictions"].astype(str).tolist()
+finetuned_preds = finetuned_df["Train Predictions"].astype(str).tolist()
+references = original_df["Train References"].astype(str).tolist()
+
+# STEP 2: Define game list (lowercase for matching)
+games = [
+    "PUBG", "VALORANT", "SUPER MARIO", "GTA Vice city", "minecraft",
+    "AMONGUS", "Fortnite", "Rocket league", "FIFA", "World of Warcraft"
+]
+games_lower = [g.lower() for g in games]
+
+# STEP 3: Function to extract game name from sentence
+def extract_game(text):
+    text_lower = text.lower()
+    for g in games_lower:
+        if g in text_lower:
+            return g.title()  # Return in proper case
+    return "Unknown"
+
+# Apply to all sentences
+original_games = [extract_game(text) for text in original_preds]
+finetuned_games = [extract_game(text) for text in finetuned_preds]
+reference_games = [extract_game(text) for text in references]
+
+# Combine all embeddings
+model = SentenceTransformer('bert-base-uncased')
+original_embeds = model.encode(original_preds, convert_to_numpy=True)
+finetuned_embeds = model.encode(finetuned_preds, convert_to_numpy=True)
+reference_embeds = model.encode(references, convert_to_numpy=True)
+
+all_embeddings = np.concatenate([original_embeds, finetuned_embeds, reference_embeds], axis=0)
+all_game_labels = original_games + finetuned_games + reference_games
+
+# STEP 4: t-SNE dimensionality reduction
+embeddings_2d = TSNE(n_components=2, perplexity=74, random_state=42).fit_transform(all_embeddings)
+
+# STEP 5: Define color map
+color_map = {
+    "Pubg": "#1f77b4",
+    "Valorant": "#ff7f0e",
+    "Super Mario": "#2ca02c",
+    "Gta Vice City": "#d62728",
+    "Minecraft": "#9467bd",
+    "Among Us": "#8c564b",
+    "Fortnite": "#e377c2",
+    "Rocket League": "#7f7f7f",
+    "Fifa": "#bcbd22",
+    "World Of Warcraft": "#17becf",
+    "Unknown": "#000000"
+}
+
+# STEP 6: Plot
+plt.figure(figsize=(12, 7))
+for game in sorted(set(all_game_labels)):
+    idxs = [i for i, g in enumerate(all_game_labels) if g == game]
+    plt.scatter(embeddings_2d[idxs, 0], embeddings_2d[idxs, 1],
+                c=color_map.get(game, "black"), label=game, alpha=0.6)
+
+plt.legend(title="Games", bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.title("t-SNE Embedding Space Colored by Game Name")
+plt.xlabel("Dimension 1")
+plt.ylabel("Dimension 2")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+import re
+
+# STEP 1: Load Excel files
+sheet_name = "Train Results"
+original_df = pd.read_excel("/content/evaluation_metrics (2).xlsx", sheet_name=sheet_name)
+finetuned_df = pd.read_excel("/content/evaluation_metrics (3).xlsx", sheet_name=sheet_name)
+
+# Extract text
+original_preds = original_df["Train Predictions"].astype(str).tolist()
+finetuned_preds = finetuned_df["Train Predictions"].astype(str).tolist()
+references = original_df["Train References"].astype(str).tolist()
+
+# STEP 2: Game list
+games = [
+    "PUBG", "VALORANT", "SUPER MARIO", "GTA Vice city", "minecraft",
+    "AMONGUS", "Fortnite", "Rocket league", "FIFA", "World of Warcraft"
+]
+games_lower = [g.lower() for g in games]
+
+# STEP 3: Extract game names
+def extract_game(text):
+    text_lower = text.lower()
+    for g in games_lower:
+        if g in text_lower:
+            return g.title()
+    return "Unknown"
+
+original_games = [extract_game(text) for text in original_preds]
+finetuned_games = [extract_game(text) for text in finetuned_preds]
+reference_games = [extract_game(text) for text in references]
+
+# STEP 4: Generate embeddings
+model = SentenceTransformer('bert-base-uncased')
+original_embeds = model.encode(original_preds, convert_to_numpy=True)
+finetuned_embeds = model.encode(finetuned_preds, convert_to_numpy=True)
+reference_embeds = model.encode(references, convert_to_numpy=True)
+
+# STEP 5: Apply t-SNE separately
+original_2d = TSNE(n_components=2, perplexity=50, random_state=42).fit_transform(original_embeds)
+finetuned_2d = TSNE(n_components=2, perplexity=50, random_state=42).fit_transform(finetuned_embeds)
+reference_2d = TSNE(n_components=2, perplexity=50, random_state=42).fit_transform(reference_embeds)
+
+# STEP 6: Color map
+color_map = {
+    "Pubg": "#1f77b4",
+    "Valorant": "#ff7f0e",
+    "Super Mario": "#2ca02c",
+    "Gta Vice City": "#d62728",
+    "Minecraft": "#9467bd",
+    "Amongus": "#8c564b",
+    "Fortnite": "#e377c2",
+    "Rocket League": "#7f7f7f",
+    "Fifa": "#bcbd22",
+    "World Of Warcraft": "#17becf",
+    "Unknown": "#000000"
+}
+
+# STEP 7: Plot all three in separate subplots
+fig, axs = plt.subplots(1, 3, figsize=(20, 6), sharex=False, sharey=False)
+
+def plot_game_scatter(ax, data_2d, labels, title):
+    for game in sorted(set(labels)):
+        idxs = [i for i, g in enumerate(labels) if g == game]
+        ax.scatter(data_2d[idxs, 0], data_2d[idxs, 1],
+                   c=color_map.get(game, "black"), label=game, alpha=0.6)
+    ax.set_title(title)
+    ax.set_xlabel("Dimension 1")
+    ax.set_ylabel("Dimension 2")
+    ax.grid(True)
+
+# Plot each set
+plot_game_scatter(axs[0], original_2d, original_games, "Original Predictions")
+plot_game_scatter(axs[1], finetuned_2d, finetuned_games, "Fine-tuned Predictions")
+plot_game_scatter(axs[2], reference_2d, reference_games, "Reference Captions")
+
+# Only show legend in one subplot
+axs[2].legend(title="Games", bbox_to_anchor=(1.05, 1), loc='upper left')
+
+plt.tight_layout()
+plt.show()
+
+
+import pandas as pd
+import numpy as np
+import torch
+from transformers import BertTokenizer, BertModel
+from sklearn.metrics.pairwise import cosine_similarity
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+# Set device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# STEP 1: Load Excel data
+sheet_name = "Train Results"
+original_df = pd.read_excel("/content/evaluation_metrics (2).xlsx", sheet_name=sheet_name)
+finetuned_df = pd.read_excel("/content/evaluation_metrics (3).xlsx", sheet_name=sheet_name)
+
+original_preds = original_df["Train Predictions"].astype(str).tolist()
+finetuned_preds = finetuned_df["Train Predictions"].astype(str).tolist()
+references = original_df["Train References"].astype(str).tolist()
+
+# STEP 2: Load BERT model and tokenizer
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+bert_model = BertModel.from_pretrained('bert-base-uncased').to(device)
+bert_model.eval()
+
+# STEP 3: Function to compute [CLS] embeddings
+def get_bert_embeddings(sentences):
+    embeddings = []
+    with torch.no_grad():
+        for sent in tqdm(sentences, desc="Encoding"):
+            inputs = tokenizer(sent, return_tensors='pt', truncation=True, padding=True, max_length=128).to(device)
+            outputs = bert_model(**inputs)
+            cls_embedding = outputs.last_hidden_state[:, 0, :]  # CLS token
+            embeddings.append(cls_embedding.cpu().numpy().squeeze())
+    return np.array(embeddings)
+
+# STEP 4: Generate embeddings using BERT
+original_embeds = get_bert_embeddings(original_preds)
+finetuned_embeds = get_bert_embeddings(finetuned_preds)
+reference_embeds = get_bert_embeddings(references)
+
+# STEP 5: Compute cosine similarities
+min_len = min(len(original_embeds), len(finetuned_embeds), len(reference_embeds))
+
+original_sim = np.array([
+    cosine_similarity([original_embeds[i]], [reference_embeds[i]])[0][0]
+    for i in range(min_len)
+])
+
+finetuned_sim = np.array([
+    cosine_similarity([finetuned_embeds[i]], [reference_embeds[i]])[0][0]
+    for i in range(min_len)
+])
+
+# STEP 6: Plot cosine similarity comparison
+x = np.arange(min_len)
+plt.figure(figsize=(14, 6))
+plt.plot(x, original_sim, label='Original vs Reference', color='blue', alpha=0.6)
+plt.plot(x, finetuned_sim, label='Fine-tuned vs Reference', color='red', alpha=0.6)
+
+plt.xlabel("Sample Index")
+plt.ylabel("Cosine Similarity")
+plt.title("Cosine Similarity to Reference (BERT): Original vs Fine-tuned Predictions")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import matplotlib.pyplot as plt
+
+# STEP 1: Load Excel data
+sheet_name = "Train Results"
+
+original_df = pd.read_excel("/content/evaluation_metrics (2).xlsx", sheet_name=sheet_name)
+finetuned_df = pd.read_excel("/content/evaluation_metrics (3).xlsx", sheet_name=sheet_name)
+
+original_preds = original_df["Train Predictions"].astype(str).tolist()
+finetuned_preds = finetuned_df["Train Predictions"].astype(str).tolist()
+references = original_df["Train References"].astype(str).tolist()
+
+# STEP 2: Get embeddings
+# model = SentenceTransformer('bert-base-uncased')
+model = SentenceTransformer('intfloat/e5-large-v2')
+
+original_embeds = model.encode(original_preds, convert_to_numpy=True)
+finetuned_embeds = model.encode(finetuned_preds, convert_to_numpy=True)
+reference_embeds = model.encode(references, convert_to_numpy=True)
+
+# STEP 3: Compute cosine similarities
+min_len = min(len(original_embeds), len(finetuned_embeds), len(reference_embeds))
+
+original_sim = np.array([
+    cosine_similarity([original_embeds[i]], [reference_embeds[i]])[0][0]
+    for i in range(min_len)
+])
+
+finetuned_sim = np.array([
+    cosine_similarity([finetuned_embeds[i]], [reference_embeds[i]])[0][0]
+    for i in range(min_len)
+])
+
+# STEP 4: Color-code based on improvement
+colors = []
+for o, f in zip(original_sim, finetuned_sim):
+    if f > o:
+        colors.append("green")     # improvement
+    elif f < o:
+        colors.append("red")       # degradation
+    else:
+        colors.append("gray")      # no change
+
+# STEP 5: Scatter Plot with Color Coding
+plt.figure(figsize=(8, 6))
+plt.scatter(original_sim, finetuned_sim, c=colors, alpha=0.7, edgecolor='k')
+
+# Add diagonal
+lims = [min(original_sim.min(), finetuned_sim.min()), max(original_sim.max(), finetuned_sim.max())]
+plt.plot(lims, lims, 'k--', label="y = x")
+
+plt.xlabel("Original vs Reference (Cosine Similarity)")
+plt.ylabel("Fine-tuned vs Reference (Cosine Similarity)")
+plt.title("Scatter Plot of Cosine Similarities (Color-Coded by Drift)")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
